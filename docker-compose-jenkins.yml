@@ -1,0 +1,31 @@
+version: '3.4'
+services:
+  jenkins:
+    image: jenkins:latest
+    environment:
+      - JENKINS_OPTS="--prefix=/jenkins"
+    networks:
+      - proxy
+    volumes:
+      - jenkins-data:/var/jenkins_home
+    deploy:
+      replicas: 1
+      labels:
+        - com.df.notify=true
+        - com.df.distribute=true
+#        - com.df.serviceDomain=jenkins.fontanoz.dev.aws.usc.edu
+        - com.df.serviceDomain=JENKINS_HOSTNAME
+        - com.df.port=8080
+        - com.df.xForwardedProto=true
+      update_config:
+        parallelism: 1
+        delay: 10s
+      restart_policy:
+        condition: on-failure
+networks:
+  proxy:
+    external:
+      name: proxy
+volumes:
+  jenkins-data:
+    driver: "cloudstor:aws"
