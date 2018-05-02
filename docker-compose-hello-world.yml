@@ -1,0 +1,25 @@
+version: '3.4'
+
+services:
+  hello-world:
+    image: tutum/hello-world
+    networks:
+      - proxy
+    deploy:
+      replicas: 1
+      labels:
+        - com.df.notify=true
+        - com.df.distribute=true
+        - com.df.serviceDomain=helloworld.fontanoz2.dev.aws.usc.edu
+#        - com.df.port=8080
+        - com.df.httpsOnly=true
+        - com.df.xForwardedProto=true
+      update_config:
+        parallelism: 1
+        delay: 10s
+      restart_policy:
+        condition: on-failure
+networks:
+  proxy:
+    external:
+      name: proxy
