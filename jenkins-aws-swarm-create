@@ -1,0 +1,235 @@
+env.KEY_NAME = 'fontanoz2.dev.aws.usc.edu'
+env.KEY_FILENAME = 'fontanoz2.dev.aws.usc.edu.pem'
+env.AWS_DEFAULT_REGION = 'us-west-2'
+env.STACK_NAME = 'Docker-fontanoz2'
+env.MANAGER_INSTANCE_TYPE = 't2.small'
+env.INSTANCE_TYPE = 't2.small'
+env.TAG_PROJECT = 'aws'
+env.TAG_OWNER = 'ems'
+env.TAG_CONTACT = 'Jaime Fontanoza'
+env.TAG_EMAIL = 'fontanoz@usc.edu'
+env.HOSTED_ZONE_NAME = 'fontanoz2.dev.aws.usc.edu'
+env.HOSTED_ZONE_ID = ''
+
+node {
+    
+    def MANAGER_IP
+    def SWARMWIDE_SECURITY_GROUP_ID
+    def DEFAULT_DNS_TARGET
+    def ELB_DNS_ZONE_ID
+
+    stage("Recreate Key") {
+        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: '8ca743fb-f649-4d1a-8eef-be3b62f3a749']]) {
+            def RESULT_DELETE_KEY = sh returnStdout: true, script: 'aws ec2 delete-key-pair --key-name ${KEY_NAME} || true'
+            echo "RESULT_DELETE_KEY = ${RESULT_DELETE_KEY}"
+
+            def RESULT_CREATE_KEY = sh returnStdout: true, script: 'aws ec2 create-key-pair --key-name ${KEY_NAME}'
+            echo "RESULT_CREATE_KEY = ${RESULT_CREATE_KEY}"
+            writeFile file: "${KEY_NAME}-material.pem", text: RESULT_CREATE_KEY
+
+            def RESULT_KEY_MATERIAL = sh returnStdout: true, script: 'jq -r \'.KeyMaterial\' ${KEY_NAME}-material.pem'
+            echo "RESULT_KEY_MATERIAL = ${RESULT_KEY_MATERIAL}"
+
+            writeFile file: "${KEY_FILENAME}", text: RESULT_KEY_MATERIAL
+
+            sh "chmod 600 ${KEY_FILENAME}"
+
+        } // withCredentials
+    } // stage("Recreate Key")
+   
+    stage("Create Stack") {
+        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: '8ca743fb-f649-4d1a-8eef-be3b62f3a749']]) {
+
+            def RESULT_CREATE_STACK = sh returnStdout: true, script: '''aws cloudformation create-stack \
+--template-url https://editions-us-east-1.s3.amazonaws.com/aws/stable/Docker.tmpl \
+--stack-name ${STACK_NAME} \
+--capabilities CAPABILITY_IAM \
+--parameters \
+ParameterKey=KeyName,ParameterValue=${KEY_NAME} \
+ParameterKey=InstanceType,ParameterValue=${INSTANCE_TYPE}  \
+ParameterKey=ManagerInstanceType,ParameterValue=${MANAGER_INSTANCE_TYPE} \
+ParameterKey=ManagerSize,ParameterValue=3 \
+ParameterKey=ClusterSize,ParameterValue=1 \
+ParameterKey=EnableCloudStorEfs,ParameterValue=yes \
+--tags \
+"Key=Project,Value=${TAG_PROJECT}" \
+"Key=Owner,Value=${TAG_OWNER}" \
+"Key=Contact,Value=${TAG_CONTACT}" \
+"Key=Email,Value=${TAG_EMAIL}"
+                '''
+            echo "RESULT_CREATE_STACK = ${RESULT_CREATE_STACK}"
+                
+            def r
+            timeout(20) {
+                echo "beginning sleepy stack check, interval: 30, max: 1200"
+                waitUntil {
+                    script {
+                        sleep 30
+                        def result = sh returnStdout: true, script: 'aws cloudformation describe-stacks --stack-name ${STACK_NAME} --query \'Stacks[0].StackStatus\' --output text'
+                        r = result.trim()
+                        echo "current status: ${r}"
+                        return (r != "CREATE_IN_PROGRESS")
+                    }
+                }
+            } // timeout(20)
+                
+            echo "end result after timeout: ${r}"
+            if(r != "CREATE_COMPLETE") {
+                error("Stack creation failed: ${r}")
+            }
+
+        } // withCredentials
+    }   // Stage("Create Stack")
+    
+    stage("Collect Stack Info") {
+         withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: '8ca743fb-f649-4d1a-8eef-be3b62f3a749']]) {
+       
+            def MANAGER_QUERY = sh returnStdout: true, script: 'aws ec2 describe-instances --filter "Name=tag:Name,Values=$STACK_NAME-Manager" "Name=instance-state-name,Values=running"'
+            writeFile file: "managers.txt", text: MANAGER_QUERY
+            MANAGER_IP = sh returnStdout: true, script: 'jq -r ".Reservations[0].Instances[0].PublicIpAddress" managers.txt'
+            MANAGER_IP = MANAGER_IP.trim()
+            echo "MANAGER_IP = ${MANAGER_IP}"
+        
+            SWARMWIDE_SECURITY_GROUP_ID = sh returnStdout: true, script: 'aws cloudformation describe-stacks --stack-name $STACK_NAME --query "Stacks[0].Outputs[?OutputKey==\'SwarmWideSecurityGroupID\'].OutputValue" --output text'
+            SWARMWIDE_SECURITY_GROUP_ID = SWARMWIDE_SECURITY_GROUP_ID.trim()
+            echo "SWARMWIDE_SECURITY_GROUP_ID = ${SWARMWIDE_SECURITY_GROUP_ID}"
+
+            DEFAULT_DNS_TARGET = sh returnStdout: true, script: 'aws cloudformation describe-stacks --stack-name $STACK_NAME --query "Stacks[0].Outputs[?OutputKey==\'DefaultDNSTarget\'].OutputValue" --output text'
+            DEFAULT_DNS_TARGET = DEFAULT_DNS_TARGET.trim()
+            echo "DEFAULT_DNS_TARGET = ${DEFAULT_DNS_TARGET}"
+
+            ELB_DNS_ZONE_ID = sh returnStdout: true, script: 'aws cloudformation describe-stacks --stack-name $STACK_NAME --query "Stacks[0].Outputs[?OutputKey==\'ELBDNSZoneID\'].OutputValue" --output text'
+            ELB_DNS_ZONE_ID = ELB_DNS_ZONE_ID.trim()
+            echo "ELB_DNS_ZONE_ID = ${ELB_DNS_ZONE_ID}"
+         }
+        
+    } // stage("Collect Stack Info")
+    
+    stage("Create DNS Hosted Zone") {
+         withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: '8ca743fb-f649-4d1a-8eef-be3b62f3a749']]) {
+
+			// reusable delegation set id created in advance via "aws route53 create-reusable-delegation-set"
+            def REUSABLE_DELEGATION_SET_ID = "NYWWP2553YG74"
+
+            def HOSTED_ZONE_CALLER_REF = sh returnStdout: true, script: 'python -c \'import uuid; print(uuid.uuid4())\''
+            HOSTED_ZONE_CALLER_REF = HOSTED_ZONE_CALLER_REF.trim()
+            echo "HOSTED_ZONE_CALLER_REF = ${HOSTED_ZONE_CALLER_REF}"
+            def cmd = "aws route53 create-hosted-zone --caller-reference ${HOSTED_ZONE_CALLER_REF} --delegation-set-id ${REUSABLE_DELEGATION_SET_ID} --name ${HOSTED_ZONE_NAME}"
+            def RESULT_CREATE_ZONE = sh returnStdout: true, script: cmd
+
+            def RESULT_LIST_ZONES = sh returnStdout: true, script: 'aws route53 list-hosted-zones'
+            echo "RESULT_LIST_ZONES = ${RESULT_LIST_ZONES}"
+            writeFile file: "pipe.txt", text: RESULT_LIST_ZONES
+
+            def RESULT_HOSTED_ZONE = sh returnStdout: true, script: 'jq -r ".HostedZones[] | select(.Name == \\"$HOSTED_ZONE_NAME.\\") | .Id" pipe.txt'
+            echo "RESULT_HOSTED_ZONE = ${RESULT_HOSTED_ZONE}"
+            writeFile file: "pipe.txt", text: RESULT_HOSTED_ZONE
+            
+            HOSTED_ZONE_ID = sh returnStdout: true, script: 'cut -d\'/\' -f3 pipe.txt'
+            HOSTED_ZONE_ID = HOSTED_ZONE_ID.trim()
+            echo "HOSTED_ZONE_ID = ${HOSTED_ZONE_ID}"
+
+            def WILDCARD_RECORD="*.${HOSTED_ZONE_NAME}"
+            echo "WILDCARD_RECORD = ${WILDCARD_RECORD}"
+
+            cmd = "aws route53 change-resource-record-sets --hosted-zone-id ${HOSTED_ZONE_ID} --change-batch \'{\"Comment\": \"Update DNS record to the new Loadbalancer Endpoint\", \"Changes\": [{\"Action\": \"UPSERT\",\"ResourceRecordSet\": {\"Type\": \"A\", \"AliasTarget\": { \"EvaluateTargetHealth\": false, \"HostedZoneId\": \"${ELB_DNS_ZONE_ID}\", \"DNSName\": \"${DEFAULT_DNS_TARGET}\"}, \"Name\": \"${WILDCARD_RECORD}\"}}]}\'"
+            echo "cmd = ${cmd}"
+            def RESULT_CREATE_WILDCARD = sh returnStdout: true, script: cmd
+            RESULT_CREATE_WILDCARD = RESULT_CREATE_WILDCARD.trim()
+            echo "RESULT_CREATE_WILDCARD = ${RESULT_CREATE_WILDCARD}"
+
+         } // withCredentials
+    } // Stage("Create Hosted Zone")
+    
+    stage("Open Ingress Ports") {
+         withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: '8ca743fb-f649-4d1a-8eef-be3b62f3a749']]) {
+
+            def result
+            def cmd
+            def port
+
+            port = "80"
+            cmd = "aws ec2 authorize-security-group-ingress --group-id ${SWARMWIDE_SECURITY_GROUP_ID} --protocol tcp --port ${port} --cidr \"0.0.0.0/0\""        
+            echo "${cmd}"
+            result = sh returnStdout: true, script: cmd
+            echo "${result}"
+
+            port = "443"
+            cmd = "aws ec2 authorize-security-group-ingress --group-id ${SWARMWIDE_SECURITY_GROUP_ID} --protocol tcp --port ${port} --cidr \"0.0.0.0/0\""
+            echo "${cmd}"
+            result = sh returnStdout: true, script: cmd
+            echo "${result}"
+        } // withCredentials
+    } // Stage("Open Ingress Ports")
+    
+    stage("Create S3 Bucket") {
+         withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: '8ca743fb-f649-4d1a-8eef-be3b62f3a749']]) {
+     
+            def result
+               def cmd
+               def port
+
+            def BUCKET_NAME ="s3.${HOSTED_ZONE_NAME}"
+            def ENCRYPTION_METHOD = "AES256"
+
+            cmd = "aws s3api create-bucket --bucket ${BUCKET_NAME} --region ${AWS_DEFAULT_REGION} --create-bucket-configuration LocationConstraint=${AWS_DEFAULT_REGION}"
+            echo "${cmd}"
+            result = sh returnStdout: true, script: cmd
+            echo "${result}"
+
+            cmd = "aws s3api put-bucket-versioning --bucket ${BUCKET_NAME} --versioning-configuration Status=Enabled"
+            echo "${cmd}"
+            result = sh returnStdout: true, script: cmd
+            echo "${result}"
+
+            def jsonInput = '{"Rules": [{"ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"}}]}'
+            echo "${jsonInput}"
+            writeFile file: "input.json", text: jsonInput
+
+            cmd = "aws s3api put-bucket-encryption --bucket ${BUCKET_NAME} --server-side-encryption-configuration file://input.json"
+            echo "${cmd}"
+            result = sh returnStdout: true, script: cmd
+            echo "${result}"
+
+        } // withCredentials
+    } // Stage("Create S3 Bucket")
+    
+    stage("Run remote docker commands") {
+        def r
+
+		def SCRIPT_DOCKER_PROXY_STACK = "https://raw.githubusercontent.com/docker-flow/docker-flow-proxy/master/docker-compose-stack.yml"
+		
+        r = sh returnStdout: true, script: "ssh -i ${KEY_FILENAME} -o StrictHostKeyChecking=no docker@${MANAGER_IP} docker node ls"
+        echo "${r}"
+
+        r = sh returnStdout: true, script: "ssh -i ${KEY_FILENAME} -o StrictHostKeyChecking=no docker@${MANAGER_IP} docker network create --driver overlay proxy"
+        echo "${r}"
+        
+        r = sh returnStdout: true, script: "ssh -i ${KEY_FILENAME} -o StrictHostKeyChecking=no docker@${MANAGER_IP} curl -o proxy-stack.yml ${SCRIPT_DOCKER_PROXY_STACK}"
+        echo "${r}"
+
+        r = sh returnStdout: true, script: "ssh -i ${KEY_FILENAME} -o StrictHostKeyChecking=no docker@${MANAGER_IP} docker stack deploy -c proxy-stack.yml proxy"
+        echo "${r}"
+        
+    } // stage("Run docker commands")
+    
+    stage("Deploy Remote Jenkins") {
+
+        def r
+		def SCRIPT_JENKINS_STACK = "https://raw.githubusercontent.com/jfontanoza/uscdev/master/docker-compose-jenkins.yml"
+        def REMOTE_JENKINS_HOSTNAME = "jenkins.${HOSTED_ZONE_NAME}"
+        
+        echo "REMOTE_JENKINS_HOSTNAME = ${REMOTE_JENKINS_HOSTNAME}"
+
+        r = sh returnStdout: true, script: "ssh -i ${KEY_FILENAME} -o StrictHostKeyChecking=no docker@${MANAGER_IP} curl -o jenkins.yml ${SCRIPT_JENKINS_STACK}"
+        echo "${r}"
+
+        r = sh returnStdout: true, script: "ssh -i ${KEY_FILENAME} -o StrictHostKeyChecking=no docker@${MANAGER_IP} sed -i \'s/JENKINS_HOSTNAME/${REMOTE_JENKINS_HOSTNAME}/g' jenkins.yml"
+        echo "${r}"
+
+        r = sh returnStdout: true, script: "ssh -i ${KEY_FILENAME} -o StrictHostKeyChecking=no docker@${MANAGER_IP} docker stack deploy -c jenkins.yml jenkins"
+        echo "${r}"
+
+    } // stage("deploy remote jenkins")
+    
+}   // node
