@@ -108,7 +108,7 @@ ParameterKey=EnableCloudStorEfs,ParameterValue=yes \
     stage("Create DNS Hosted Zone") {
          withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: '8ca743fb-f649-4d1a-8eef-be3b62f3a749']]) {
 
-			// reusable delegation set id created in advance via "aws route53 create-reusable-delegation-set"
+            // reusable delegation set id created in advance via "aws route53 create-reusable-delegation-set"
             def REUSABLE_DELEGATION_SET_ID = "NYWWP2553YG74"
 
             def HOSTED_ZONE_CALLER_REF = sh returnStdout: true, script: 'python -c \'import uuid; print(uuid.uuid4())\''
@@ -165,10 +165,8 @@ ParameterKey=EnableCloudStorEfs,ParameterValue=yes \
     stage("Create S3 Bucket") {
          withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: '8ca743fb-f649-4d1a-8eef-be3b62f3a749']]) {
      
-            def result
-               def cmd
-               def port
-
+            def result, cmd
+   
             def BUCKET_NAME ="s3.${HOSTED_ZONE_NAME}"
             def ENCRYPTION_METHOD = "AES256"
 
@@ -197,8 +195,8 @@ ParameterKey=EnableCloudStorEfs,ParameterValue=yes \
     stage("Run remote docker commands") {
         def r
 
-		def SCRIPT_DOCKER_PROXY_STACK = "https://raw.githubusercontent.com/docker-flow/docker-flow-proxy/master/docker-compose-stack.yml"
-		
+        def SCRIPT_DOCKER_PROXY_STACK = "https://raw.githubusercontent.com/docker-flow/docker-flow-proxy/master/docker-compose-stack.yml"
+        
         r = sh returnStdout: true, script: "ssh -i ${KEY_FILENAME} -o StrictHostKeyChecking=no docker@${MANAGER_IP} docker node ls"
         echo "${r}"
 
@@ -216,7 +214,7 @@ ParameterKey=EnableCloudStorEfs,ParameterValue=yes \
     stage("Deploy Remote Jenkins") {
 
         def r
-		def SCRIPT_JENKINS_STACK = "https://raw.githubusercontent.com/jfontanoza/uscdev/master/docker-compose-jenkins.yml"
+        def SCRIPT_JENKINS_STACK = "https://raw.githubusercontent.com/jfontanoza/uscdev/master/docker-compose-jenkins.yml"
         def REMOTE_JENKINS_HOSTNAME = "jenkins.${HOSTED_ZONE_NAME}"
         
         echo "REMOTE_JENKINS_HOSTNAME = ${REMOTE_JENKINS_HOSTNAME}"
